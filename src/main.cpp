@@ -12,7 +12,6 @@ typedef pair<int, int> Edge;
 // 为 Edge 类型定义哈希函数
 struct EdgeHash {
     size_t operator()(const Edge& e) const {
-        // 使用 std::hash 对两个整数分别哈希，然后组合
         auto hash1 = hash<int>{}(e.first);
         auto hash2 = hash<int>{}(e.second);
         // 组合哈希值的一种方法
@@ -246,9 +245,10 @@ int main(int argc, char* argv[]) {
     int E = g.second.second;
 
 
-    // auto classes = truss_decomposition(adj, V, E);
+    auto classes = truss_decomposition(adj, V, E);
 
     cout << " |V|    |E|    kmax" << endl;
     cout << V << "\t" << E << endl;
     return 0;
 }
+
