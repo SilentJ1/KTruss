@@ -6,13 +6,13 @@ using namespace std;
 using namespace std::chrono;
 
 int main(int argc, char* argv[]) {
-    // if (argc != 2) {
-    //     cerr << "Usage: " << argv[0] << " <graph_file>" << endl;
-    //     return 1;
-    // }
+    if (argc != 2) {
+        cerr << "Usage: " << argv[0] << " <graph_file>" << endl;
+        return 1;
+    }
 
-    // string filename = argv[1];
-    string filename = "/home/xxx/workspace/data/graph_data/amaze.txt";
+    string filename = argv[1];
+    // string filename = "/home/xxx/workspace/data/graph_data/amaze.txt";
     cout << "Processing file: " << filename << endl;
     
     // 计时开始
