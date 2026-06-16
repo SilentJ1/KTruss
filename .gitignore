@@ -1,0 +1,8 @@
+build/
+output/
+*.o
+*.obj
+*.exe
+*.out
+*.truss
+.DS_Store

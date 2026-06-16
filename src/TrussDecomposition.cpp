@@ -1,328 +1,300 @@
 #include "TrussDecomposition.h"
 
-using namespace std;
+#include <algorithm>
+#include <fstream>
+#include <queue>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
 
-/**
- * 边的比较运算符，用于确定边的顺序
- * 首先比较u顶点，若相同则比较v顶点
- */
-bool operator<(TEdge e1, TEdge e2) {
-    return e1.u < e2.u || (e1.u == e2.u && e1.v < e2.v);
-}
+namespace ktruss {
+namespace {
 
-/**
- * 构造函数，初始化图分解器
- * @param filename 输入图数据的文件路径
- */
-TrussDecomposition::TrussDecomposition(string filename) 
-    : filename(filename) {
-    V = E = 0;       // 初始化顶点数和边数
-    kmax = 0;        // 初始化最大truss值
-}
-
-/**
- * 析构函数，确保文件流关闭
- */
-TrussDecomposition::~TrussDecomposition() {
-    if (fin.is_open()) fin.close();
-}
-
-/**
- * 比较两个顶点的优先级
- * 首先比较度数，度数小的优先；度数相同则比较顶点ID
- */
-bool TrussDecomposition::compVertex(int i, int j) {
-    return deg[i] < deg[j] || (deg[i] == deg[j] && i < j);
-}
-
-/**
- * 确保u和v按compVertex定义的顺序排列
- * 如果u > v，则交换它们的值
- */
-void TrussDecomposition::orderPair(int &u, int &v) {
-    if (!compVertex(u, v)) swap(u, v);
-}
-
-/**
- * 更新边(u,v)的支持度（即包含该边的三角形数量）
- * @param u 边的一个顶点
- * @param v 边的另一个顶点
- * @param delta 支持度的变化量
- */
-void TrussDecomposition::updateSupport(int u, int v, int delta) {
-    adj[u][v] += delta;
-    adj[v][u] += delta;
-}
-
-/**
- * 从图中移除边(u,v)
- * @param u 边的一个顶点
- * @param v 边的另一个顶点
- */
-void TrussDecomposition::removeEdge(int u, int v) {
-    adj[u].erase(v);
-    adj[v].erase(u);
-}
-
-/**
- * 计算两个有序向量的交集（用于寻找共同邻居）
- * @param a 第一个有序向量
- * @param b 第二个有序向量
- * @param c 存储交集结果的向量
- */
-void TrussDecomposition::intersect(const vector<int> &a, const vector<int> &b, vector<int> &c) {
-    c.clear();
-    unsigned j = 0;
-    for (unsigned i = 0; i < a.size(); ++i) {
-        // 跳过b中小于a[i]的元素
-        // 降序
-        while (j < b.size() && b[j] > a[i]) ++j;
-        
-        if (j >= b.size()) break;
-        
-        if (b[j] == a[i]) c.push_back(a[i]);
+struct PairHash {
+    std::size_t operator()(const Edge& edge) const {
+        const auto first = static_cast<std::size_t>(edge.first);
+        const auto second = static_cast<std::size_t>(edge.second);
+        return (first << 32U) ^ second;
     }
+};
+
+struct QueueItem {
+    int support;
+    int edge_id;
+
+    bool operator>(const QueueItem& other) const {
+        if (support != other.support) {
+            return support > other.support;
+        }
+        return edge_id > other.edge_id;
+    }
+};
+
+std::vector<long long> parseIntegerLine(const std::string& line) {
+    std::istringstream stream(line);
+    std::vector<long long> values;
+    long long value = 0;
+    while (stream >> value) {
+        values.push_back(value);
+    }
+    return values;
 }
 
-/**
- * 从文件读取图数据
- */
-void TrussDecomposition::readGraph() {
-    fin.open(filename.c_str());
-    if (!fin.is_open()) {
-        cerr << "Error opening input file!" << endl;
-        exit(1);
+Edge canonicalEdge(long long raw_u, long long raw_v, bool one_based) {
+    raw_u -= one_based ? 1 : 0;
+    raw_v -= one_based ? 1 : 0;
+    if (raw_u < 0 || raw_v < 0) {
+        throw std::out_of_range("vertex id is negative after base conversion");
+    }
+    if (raw_u == raw_v) {
+        return {-1, -1};
     }
 
-    // 读取顶点数和边数
-    fin >> V >> E;
-    deg.resize(V, 0);     // 初始化度数数组
-    adj.resize(V);        // 初始化邻接表
-    
-    // 读取每个顶点的邻接表
-    for (int u = 0; u < V; ++u) {
-        int out_degree;
-        fin >> out_degree >> out_degree;  // 读取两次
-        for (int j = 0; j < out_degree; ++j) {
-            int v;
-            fin >> v;
-            // 避免重复添加边
-            if (adj[u].find(v) == adj[u].end()) {
-                adj[u][v] = 0;  // 初始化支持度为0
-                adj[v][u] = 0;
-                ++deg[u];       // 更新顶点度数
-                ++deg[v];
-            }
+    Vertex u = static_cast<Vertex>(raw_u);
+    Vertex v = static_cast<Vertex>(raw_v);
+    if (u > v) {
+        std::swap(u, v);
+    }
+    return {u, v};
+}
+
+bool looksLikeAdjacencyRows(const std::vector<std::vector<long long>>& rows) {
+    if (rows.empty()) {
+        return false;
+    }
+
+    bool id_rows = true;
+    bool degree_rows = true;
+    for (const auto& row : rows) {
+        if (row.empty()) {
+            return false;
+        }
+        if (row.size() < 2 || row[1] != static_cast<long long>(row.size() - 2)) {
+            id_rows = false;
+        }
+        if (row[0] != static_cast<long long>(row.size() - 1)) {
+            degree_rows = false;
         }
     }
-    m = E;  // m表示实际处理的边数
-    fin.close();
+    return id_rows || degree_rows;
 }
 
-/**
- * 对顶点进行重排序
- * 按照顶点度数从小到大排序，度数相同则按ID排序
- */
-void TrussDecomposition::reorder() {
-    mapto.resize(V);
-    for (int i = 0; i < V; ++i) mapto[i] = i;
-    // 使用lambda表达式进行排序
-    sort(mapto.begin(), mapto.end(), [this](int i, int j) {
-        return compVertex(i, j);
+GraphData graphFromEdges(std::vector<Edge> edges, std::size_t declared_vertices = 0) {
+    std::sort(edges.begin(), edges.end());
+    edges.erase(std::remove(edges.begin(), edges.end(), Edge{-1, -1}), edges.end());
+    edges.erase(std::unique(edges.begin(), edges.end()), edges.end());
+
+    std::size_t vertex_count = declared_vertices;
+    for (const auto& [u, v] : edges) {
+        vertex_count = std::max(vertex_count, static_cast<std::size_t>(std::max(u, v) + 1));
+    }
+    return {vertex_count, std::move(edges)};
+}
+
+GraphData parseAdjacency(const std::vector<std::vector<long long>>& rows, std::size_t vertex_count, bool one_based) {
+    const bool use_id_rows = std::all_of(rows.begin(), rows.end(), [](const auto& row) {
+        return row.size() >= 2 && row[1] == static_cast<long long>(row.size() - 2);
     });
-}
 
-/**
- * 计算图中每个边的三角形数量（支持度）
- * 使用重排序后的顶点顺序，从后向前处理每个顶点
- */
-void TrussDecomposition::countTriangles() {
-    // A[u]存储的是顶点u的邻居顶点在mapto数组中的索引
-    A.resize(V);  // 初始化辅助邻接表
-    
-    // 按重排序后的顺序处理顶点
-    for (int vi = V - 1; vi >= 0; --vi) {
-        int v = mapto[vi];
-        for (auto it = adj[v].begin(); it != adj[v].end(); ++it) {
-            int u = it->first;
-            if (!compVertex(u, v)) continue;  // 确保u < v
-            
-            // 计算u和v的共同邻居
-            vector<int> common;
-            intersect(A[u], A[v], common);
-            
-            // 每找到一个共同邻居，就形成一个三角形
-            for (unsigned i = 0; i < common.size(); ++i) {
-                int w = mapto[common[i]];
-                updateSupport(u, v, 1);  // 更新边的支持度
-                updateSupport(v, w, 1);
-                updateSupport(w, u, 1);
+    std::vector<Edge> edges;
+    for (std::size_t row_index = 0; row_index < rows.size(); ++row_index) {
+        const auto& row = rows[row_index];
+        std::size_t source_index = row_index;
+        std::size_t degree_index = 0;
+        std::size_t first_neighbor = 1;
+
+        if (use_id_rows) {
+            long long raw_source = row[0] - (one_based ? 1 : 0);
+            if (raw_source < 0) {
+                throw std::out_of_range("adjacency source id is negative after base conversion");
             }
-            
-            // 将当前顶点索引添加到u的辅助邻接表中
-            A[u].push_back(vi);
+            source_index = static_cast<std::size_t>(raw_source);
+            degree_index = 1;
+            first_neighbor = 2;
+        }
+
+        if (source_index >= vertex_count) {
+            throw std::out_of_range("adjacency source id is outside [0, |V|)");
+        }
+
+        const auto degree = static_cast<std::size_t>(row[degree_index]);
+        if (first_neighbor + degree != row.size()) {
+            throw std::runtime_error("adjacency row degree does not match neighbor count");
+        }
+
+        for (std::size_t i = first_neighbor; i < row.size(); ++i) {
+            long long target = row[i] - (one_based ? 1 : 0);
+            Edge edge = canonicalEdge(static_cast<long long>(source_index), target, false);
+            if (edge.first != -1 && static_cast<std::size_t>(edge.second) >= vertex_count) {
+                throw std::out_of_range("adjacency neighbor id is outside [0, |V|)");
+            }
+            edges.push_back(edge);
         }
     }
+
+    return graphFromEdges(std::move(edges), vertex_count);
 }
 
-/**
- * 对边进行桶排序，按支持度从小到大排列
- */
-void TrussDecomposition::binSort() {
-    // bin数组用于记录每个支持度对应的边的数量
-    bin.clear();
-    bin.resize(V, 0);
-    // nBins记录最大支持度值
-    // mp记录实际处理的边数
-    int nBins = 0, mp = 0;
+std::vector<Vertex> commonNeighbors(Vertex u, Vertex v, const std::vector<std::unordered_set<Vertex>>& adjacency) {
+    const auto& a = adjacency[u];
+    const auto& b = adjacency[v];
+    const auto& smaller = a.size() <= b.size() ? a : b;
+    const auto& larger = a.size() <= b.size() ? b : a;
 
-    // 统计每个支持度出现的次数
-    for (int u = 0; u < V; ++u) {
-        // tadj : map<int, int>
-        auto tadj = adj[u];
-        for (auto it = tadj.begin(); it != tadj.end(); ++it) {
-            int v = it->first;
-            if (!compVertex(u, v)) continue;
-            int sup = it->second;
-            if (sup == 0) {
-                removeEdge(u, v);  // 移除支持度为0的边
+    std::vector<Vertex> common;
+    common.reserve(std::min(a.size(), b.size()));
+    for (Vertex w : smaller) {
+        if (larger.find(w) != larger.end()) {
+            common.push_back(w);
+        }
+    }
+    return common;
+}
+
+}  // namespace
+
+GraphData readGraphFile(const std::string& filename, bool one_based) {
+    std::ifstream file(filename);
+    if (!file) {
+        throw std::runtime_error("failed to open graph file: " + filename);
+    }
+
+    std::vector<std::vector<long long>> rows;
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+        std::vector<long long> values = parseIntegerLine(line);
+        if (!values.empty()) {
+            rows.push_back(std::move(values));
+        }
+    }
+    if (rows.empty()) {
+        throw std::runtime_error("empty graph file: " + filename);
+    }
+
+    if (rows.front().size() == 2 && rows.size() > 1) {
+        const long long declared_vertices = rows.front()[0];
+        const long long declared_edges = rows.front()[1];
+        if (declared_vertices > 0 && declared_edges >= 0) {
+            std::vector<std::vector<long long>> rest(rows.begin() + 1, rows.end());
+            if (looksLikeAdjacencyRows(rest)) {
+                return parseAdjacency(rest, static_cast<std::size_t>(declared_vertices), one_based);
+            }
+            if (static_cast<std::size_t>(declared_edges) == rest.size()) {
+                std::vector<Edge> edges;
+                edges.reserve(rest.size());
+                for (const auto& edge_row : rest) {
+                    if (edge_row.size() < 2) {
+                        throw std::runtime_error("edge-list row must contain '<source> <target>'");
+                    }
+                    edges.push_back(canonicalEdge(edge_row[0], edge_row[1], one_based));
+                }
+                return graphFromEdges(std::move(edges), static_cast<std::size_t>(declared_vertices));
+            }
+        }
+    }
+
+    std::vector<Edge> edges;
+    edges.reserve(rows.size());
+    for (const auto& edge_row : rows) {
+        if (edge_row.size() < 2) {
+            throw std::runtime_error("edge-list row must contain '<source> <target>'");
+        }
+        edges.push_back(canonicalEdge(edge_row[0], edge_row[1], one_based));
+    }
+    return graphFromEdges(std::move(edges));
+}
+
+DecompositionResult decompose(const GraphData& graph) {
+    std::vector<std::unordered_set<Vertex>> adjacency(graph.vertex_count);
+    std::unordered_map<Edge, int, PairHash> edge_id;
+    edge_id.reserve(graph.edges.size() * 2 + 1);
+
+    for (std::size_t i = 0; i < graph.edges.size(); ++i) {
+        const auto [u, v] = graph.edges[i];
+        if (u < 0 || v < 0 || static_cast<std::size_t>(v) >= graph.vertex_count) {
+            throw std::out_of_range("edge endpoint is outside [0, |V|)");
+        }
+        adjacency[u].insert(v);
+        adjacency[v].insert(u);
+        edge_id[graph.edges[i]] = static_cast<int>(i);
+    }
+
+    std::vector<int> support(graph.edges.size(), 0);
+    for (std::size_t i = 0; i < graph.edges.size(); ++i) {
+        const auto [u, v] = graph.edges[i];
+        support[i] = static_cast<int>(commonNeighbors(u, v, adjacency).size());
+    }
+
+    std::priority_queue<QueueItem, std::vector<QueueItem>, std::greater<QueueItem>> queue;
+    for (std::size_t i = 0; i < support.size(); ++i) {
+        queue.push({support[i], static_cast<int>(i)});
+    }
+
+    std::vector<bool> active(graph.edges.size(), true);
+    DecompositionResult result;
+    result.vertex_count = graph.vertex_count;
+    result.edge_count = graph.edges.size();
+    result.edge_truss.resize(graph.edges.size());
+
+    while (!queue.empty()) {
+        const QueueItem item = queue.top();
+        queue.pop();
+
+        const int id = item.edge_id;
+        if (!active[id] || item.support != support[id]) {
+            continue;
+        }
+
+        const auto [u, v] = graph.edges[id];
+        const int removed_support = support[id];
+        const int truss = removed_support + 2;
+        result.kmax = std::max(result.kmax, truss);
+        result.edge_truss[id] = {graph.edges[id], truss};
+
+        const std::vector<Vertex> common = commonNeighbors(u, v, adjacency);
+        for (Vertex w : common) {
+            const Edge uw = u < w ? Edge{u, w} : Edge{w, u};
+            const Edge vw = v < w ? Edge{v, w} : Edge{w, v};
+            const auto uw_it = edge_id.find(uw);
+            const auto vw_it = edge_id.find(vw);
+            if (uw_it == edge_id.end() || vw_it == edge_id.end()) {
                 continue;
             }
-            ++mp;
-            ++bin[sup];
-            nBins = max(sup, nBins);
-        }
-    }
-    m = mp;  // 更新实际处理的边数
-    ++nBins;
 
-    // 计算每个桶的起始位置
-    int count = 0;
-    for (int i = 0; i < nBins; ++i) {
-        int binsize = bin[i];
-        bin[i] = count;
-        count += binsize;
-    }
-
-    // 将边放入对应的桶中
-    // pos数组记录每条边在binEdge中的位置
-    pos.clear();
-    pos.resize(V);
-    binEdge.resize(m);
-
-    for (int u = 0; u < V; ++u)
-        for (auto it = adj[u].begin(); it != adj[u].end(); ++it) {
-            int v = it->first;
-            if (!compVertex(u, v)) continue;
-            int sup = it->second;
-            TEdge e = {u, v};
-            int &b = bin[sup];
-            binEdge[b] = e;
-            pos[u][v] = b++;
-        }
-
-    // 调整桶的起始位置
-    for (int i = nBins; i > 0; --i) {
-        bin[i] = bin[i - 1];
-    }
-    bin[0] = 0;
-}
-
-/**
- * 更新边的支持度，并在需要时调整边在桶中的位置
- * @param u 边的一个顶点
- * @param v 边的另一个顶点
- * @param minsup 当前处理的最小支持度阈值
- */
-void TrussDecomposition::updateEdge(int u, int v, int minsup) {
-    orderPair(u, v);
-    int sup = adj[u][v];
-    if (sup <= minsup) return;  // 如果支持度已经小于等于阈值，则不处理
-
-    int p = pos[u][v];          // 当前边在数组中的位置
-    int posbin = bin[sup];      // 当前支持度桶的起始位置
-    TEdge se = binEdge[posbin]; // 桶起始位置的边
-    TEdge e = {u, v};
-
-    // 交换当前边和桶起始位置的边
-    if (p != posbin) {
-        pos[u][v] = posbin;
-        pos[se.u][se.v] = p;
-        binEdge[p] = se;
-        binEdge[posbin] = e;
-    }
-    
-    // 调整桶的起始位置
-    ++bin[sup];
-    // 减少边的支持度
-    updateSupport(u, v, -1);
-}
-
-/**
- * 执行k-truss分解的核心算法
- * 逐步移除支持度最低的边，并更新相关边的支持度
- */
-void TrussDecomposition::trussDecomp() {
-    kmax = 0; // 初始化最大truss值
-    
-    // 处理每条边
-    for (int s = 0; s < m; ++s) {
-        int u = binEdge[s].u;
-        int v = binEdge[s].v;
-        orderPair(u, v);
-        int supuv = adj[u][v];
-        
-        // 计算当前边的truss值（k = 支持度 + 2）
-        int currentTruss = supuv + 2;
-        if (currentTruss > kmax) {
-            kmax = currentTruss;  // 更新最大truss值
-        }
-
-        // 查找所有与u和v都相邻的顶点w，并更新它们的支持度
-        int nfound = 0;
-        for (auto it = adj[u].begin(); it != adj[u].end(); ++it) {
-            if (nfound == supuv) break;  // 已经找到足够的邻居
-            int w = it->first;
-            if (w == v) continue;  // 跳过v自身
-            if (adj[v].find(w) != adj[v].end()) {
-                ++nfound;
-                updateEdge(u, w, supuv);  // 更新边(u,w)的支持度
-                updateEdge(v, w, supuv);  // 更新边(v,w)的支持度
+            const int uw_id = uw_it->second;
+            const int vw_id = vw_it->second;
+            if (active[uw_id] && support[uw_id] > removed_support) {
+                --support[uw_id];
+                queue.push({support[uw_id], uw_id});
+            }
+            if (active[vw_id] && support[vw_id] > removed_support) {
+                --support[vw_id];
+                queue.push({support[vw_id], vw_id});
             }
         }
-        
-        // 处理完当前边后，将其从图中移除
-        removeEdge(u, v);
+
+        active[id] = false;
+        adjacency[u].erase(v);
+        adjacency[v].erase(u);
+    }
+
+    return result;
+}
+
+void writeEdgeTrussFile(const std::string& filename, const DecompositionResult& result) {
+    std::ofstream output(filename);
+    if (!output) {
+        throw std::runtime_error("failed to open output file: " + filename);
+    }
+
+    for (const EdgeTruss& item : result.edge_truss) {
+        output << item.edge.first << ' ' << item.edge.second << ' ' << item.truss << '\n';
     }
 }
 
-// 获取顶点数量
-int TrussDecomposition::getVnum()
-{
-    return V;
-}
-
-// 获取边的数量
-int TrussDecomposition::getEnum()
-{
-    return E;
-}
-
-// 获取最大truss值
-int TrussDecomposition::getKmax()
-{
-    return kmax;
-}
-
-/**
- * 执行完整的truss分解流程
- * 依次调用读取图、重排序、计算三角形、桶排序和truss分解
- */
-void TrussDecomposition::fun()
-{
-    readGraph();
-    reorder();
-    countTriangles();
-    binSort();
-    trussDecomp();
-}
+}  // namespace ktruss
