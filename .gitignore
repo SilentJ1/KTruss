@@ -6,3 +6,4 @@ output/
 *.out
 *.truss
 .DS_Store
+.vscode/
